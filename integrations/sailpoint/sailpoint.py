@@ -703,6 +703,13 @@ def parse_args() -> argparse.Namespace:
     return parser.parse_args()
 
 
+# ─── Progress milestone helper ────────────────────────────────────────────────
+def _milestone(step: int, total: int, message: str) -> None:
+    """Print a timestamped progress milestone to stdout."""
+    ts = datetime.now().strftime("%H:%M:%S")
+    print(f"  [{ts}] [{step}/{total}] {message}")
+
+
 # ─── Entry point ──────────────────────────────────────────────────────────────
 def main() -> None:
     print(BANNER)
@@ -710,6 +717,9 @@ def main() -> None:
     _setup_logging(args.log_level)
     log.info("SailPoint → Veza OAA integration starting")
 
+    _TOTAL_STEPS = 8
+
+    _milestone(1, _TOTAL_STEPS, "Loading configuration ...")
     config = load_config(args)
     log.info(
         "Tenant: %s | Base URL: %s | Provider: %s | Datasource: %s",
@@ -718,21 +728,37 @@ def main() -> None:
         config["provider_name"],
         config["datasource_name"],
     )
+    print(
+        f"       Tenant: {config['tenant']}  |  Provider: {config['provider_name']}  "
+        f"|  Datasource: {config['datasource_name']}"
+    )
 
-    # Authenticate to SailPoint
+    _milestone(2, _TOTAL_STEPS, "Authenticating to SailPoint ISC ...")
     access_token = get_access_token(
         config["base_url"], config["client_id"], config["client_secret"]
     )
     session = make_session(access_token)
     api_base = f"{config['base_url']}/v3"
+    print("       Token obtained successfully")
 
-    # Collect all data
+    _milestone(3, _TOTAL_STEPS, "Collecting identities ...")
     identities = collect_identities(session, api_base)
-    roles = collect_roles(session, api_base)
-    role_assignments = collect_role_assignments(session, api_base, roles)
-    access_profiles = collect_access_profiles(session, api_base)
+    print(f"       {len(identities):,} identities collected")
 
-    # Build OAA payload
+    _milestone(4, _TOTAL_STEPS, "Collecting roles ...")
+    roles = collect_roles(session, api_base)
+    print(f"       {len(roles):,} roles collected")
+
+    _milestone(5, _TOTAL_STEPS, "Collecting role assignments ...")
+    role_assignments = collect_role_assignments(session, api_base, roles)
+    assigned_count = sum(len(v) for v in role_assignments.values())
+    print(f"       {assigned_count:,} role-identity assignments collected across {len(role_assignments):,} roles")
+
+    _milestone(6, _TOTAL_STEPS, "Collecting access profiles ...")
+    access_profiles = collect_access_profiles(session, api_base)
+    print(f"       {len(access_profiles):,} access profiles collected")
+
+    _milestone(7, _TOTAL_STEPS, "Building OAA payload ...")
     app = build_oaa_payload(
         config, identities, roles, role_assignments, access_profiles
     )
@@ -743,10 +769,16 @@ def main() -> None:
         len(roles),
         len(access_profiles),
     )
+    print(
+        f"       Payload built — {len(identities):,} users  |  "
+        f"{len(roles):,} roles  |  {len(access_profiles):,} access profiles"
+    )
 
-    # Push to Veza (or dry-run)
+    _milestone(8, _TOTAL_STEPS, "Pushing payload to Veza ..." if not args.dry_run else "Dry-run — skipping Veza push ...")
     push_to_veza(config, app, dry_run=args.dry_run, save_json=args.save_json)
     log.info("Integration run complete")
+    print("\n  Done.")
+
 
 
 if __name__ == "__main__":
