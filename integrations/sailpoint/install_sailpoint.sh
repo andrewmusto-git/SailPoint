@@ -122,11 +122,16 @@ else
     SUDO=""
 fi
 
+# Capture the real installing user so we can restore ownership after sudo ops
+INSTALL_USER="$(id -un)"
+INSTALL_GROUP="$(id -gn)"
+
 # ── Create directory layout ───────────────────────────────────────────────────
 info "Creating install directories under ${SERVICE_DIR} ..."
 ${SUDO} mkdir -p "${SCRIPTS_DIR}" "${LOGS_DIR}"
 ${SUDO} chmod 755 "${SERVICE_DIR}" "${LOGS_DIR}"
 ${SUDO} chmod 700 "${SCRIPTS_DIR}"
+${SUDO} chown -R "${INSTALL_USER}:${INSTALL_GROUP}" "${SERVICE_DIR}"
 ok "Directories created"
 
 # ── Clone repository and copy integration files ───────────────────────────────
@@ -144,6 +149,7 @@ fi
 
 ${SUDO} cp -f "${tmp_dir}/${INTEGRATION_SUBDIR}/"*.py      "${SCRIPTS_DIR}/"
 ${SUDO} cp -f "${tmp_dir}/${INTEGRATION_SUBDIR}/requirements.txt" "${SCRIPTS_DIR}/"
+${SUDO} chown "${INSTALL_USER}:${INSTALL_GROUP}" "${SCRIPTS_DIR}/"*.py "${SCRIPTS_DIR}/requirements.txt"
 rm -rf "${tmp_dir}"
 ok "Integration files installed to ${SCRIPTS_DIR}"
 
@@ -208,6 +214,7 @@ VEZA_API_KEY=${VEZA_KEY_VAL}
 # DATASOURCE_NAME=${SP_TENANT}
 EOF
     ${SUDO} chmod 600 "${ENV_FILE}"
+    ${SUDO} chown "${INSTALL_USER}:${INSTALL_GROUP}" "${ENV_FILE}"
     ok ".env created with permissions 600"
 fi
 
