@@ -254,6 +254,7 @@ def paginate_search(
     index: str,
     query: str = "*",
     limit: int = 250,
+    progress_label: str = None,
 ) -> list:
     """
     Collect all results from the SailPoint Search API (POST /v3/search).
@@ -262,9 +263,13 @@ def paginate_search(
     the hard 10,000-row offset cap enforced by the API.  Falls back to a
     first page via offset=0, then switches to searchAfter for every subsequent
     page using the `id` of the last item in the previous page.
+
+    If `progress_label` is provided, a progress line is printed to stdout
+    after each page (e.g. "identities").
     """
     results = []
     search_after = None
+    page = 0
 
     while True:
         payload = {
@@ -291,8 +296,17 @@ def paginate_search(
         if not isinstance(data, list) or not data:
             break
 
+        page += 1
         results.extend(data)
         log.debug("  → page of %d; running total %d", len(data), len(results))
+
+        if progress_label:
+            print(
+                f"       {progress_label}: page {page} complete — "
+                f"{len(results):,} records fetched so far ...",
+                end="\r",
+                flush=True,
+            )
 
         if len(data) < limit:
             break
@@ -302,6 +316,10 @@ def paginate_search(
         if not search_after:
             log.warning("Last item in page has no 'id'; cannot advance cursor — stopping early")
             break
+
+    if progress_label and page > 0:
+        # Print a final newline so the next output starts on a fresh line
+        print()
 
     return results
 
@@ -315,7 +333,7 @@ def collect_identities(session: requests.Session, api_base: str) -> list:
     """
     search_url = f"{api_base}/search"
     log.info("Collecting identities from /v3/search (identities index) ...")
-    identities = paginate_search(session, search_url, index="identities")
+    identities = paginate_search(session, search_url, index="identities", progress_label="Identities")
     log.info("Collected %d identities", len(identities))
     return identities
 
