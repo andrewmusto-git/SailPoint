@@ -248,11 +248,60 @@ def paginate(session: requests.Session, url: str, params: dict = None, limit: in
     return results
 
 
+def paginate_search(
+    session: requests.Session,
+    url: str,
+    index: str,
+    query: str = "*",
+    limit: int = 250,
+) -> list:
+    """
+    Collect all results from the SailPoint Search API (POST /v3/search).
+    Uses offset-based pagination with the given limit until an empty page
+    is returned.
+    """
+    results = []
+    offset = 0
+
+    while True:
+        payload = {
+            "indices": [index],
+            "query": {"query": query},
+            "includeNested": True,
+        }
+        params = {"limit": limit, "offset": offset}
+        log.debug("POST %s  index=%s  offset=%d", url, index, offset)
+        try:
+            resp = session.post(url, json=payload, params=params, timeout=60)
+            resp.raise_for_status()
+        except requests.exceptions.HTTPError as exc:
+            log.error("HTTP error searching %s (index=%s): %s", url, index, exc)
+            raise
+
+        data = resp.json()
+        if not isinstance(data, list) or not data:
+            break
+
+        results.extend(data)
+        log.debug("  → page of %d; running total %d", len(data), len(results))
+
+        if len(data) < limit:
+            break
+        offset += limit
+
+    return results
+
+
 # ─── Data collection ──────────────────────────────────────────────────────────
 def collect_identities(session: requests.Session, api_base: str) -> list:
-    """Fetch all identities (users) from /v3/identities (paginated)."""
-    log.info("Collecting identities from /v3/identities ...")
-    identities = paginate(session, f"{api_base}/identities")
+    """Fetch all identities via POST /v3/search (identities index, paginated).
+
+    The GET /v3/identities endpoint was deprecated on newer ISC tenants; the
+    Search API is the recommended replacement and returns the same fields.
+    """
+    search_url = f"{api_base}/search"
+    log.info("Collecting identities from /v3/search (identities index) ...")
+    identities = paginate_search(session, search_url, index="identities")
     log.info("Collected %d identities", len(identities))
     return identities
 
