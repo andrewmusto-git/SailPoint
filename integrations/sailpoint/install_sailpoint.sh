@@ -2,7 +2,7 @@
 # install_sailpoint.sh — One-command installer for SailPoint ISC → Veza OAA integration
 #
 # Usage (interactive):
-#   curl -fsSL https://raw.githubusercontent.com/YOUR_ORG/YOUR_REPO/main/integrations/sailpoint/install_sailpoint.sh | bash
+#   curl -fsSL https://raw.githubusercontent.com/andrewmusto-git/SailPoint/main/integrations/sailpoint/install_sailpoint.sh | bash
 #
 # Usage (non-interactive / CI):
 #   SAILPOINT_TENANT=mycompany SAILPOINT_CLIENT_ID=... SAILPOINT_CLIENT_SECRET=... \
@@ -12,7 +12,7 @@
 set -uo pipefail
 
 # ── Config ────────────────────────────────────────────────────────────────────
-REPO_URL="https://github.com/YOUR_ORG/YOUR_REPO"
+REPO_URL="https://github.com/andrewmusto-git/SailPoint"
 BRANCH="main"
 INTEGRATION_SUBDIR="integrations/sailpoint"
 SLUG="sailpoint"

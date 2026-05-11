@@ -214,14 +214,15 @@ def make_session(access_token: str) -> requests.Session:
     return session
 
 
-def paginate(session: requests.Session, url: str, params: dict = None) -> list:
+def paginate(session: requests.Session, url: str, params: dict = None, limit: int = 250) -> list:
     """
     Collect all results from a paginated SailPoint v3 API endpoint.
-    Uses limit=250 and increments offset until an empty page is returned.
+    Uses the given limit (default 250; use 50 for /v3/roles which caps at 50)
+    and increments offset until an empty page is returned.
     """
     if params is None:
         params = {}
-    params = {**params, "limit": 250, "offset": 0}
+    params = {**params, "limit": limit, "offset": 0}
     results = []
 
     while True:
@@ -240,9 +241,9 @@ def paginate(session: requests.Session, url: str, params: dict = None) -> list:
         results.extend(data)
         log.debug("  → page of %d; running total %d", len(data), len(results))
 
-        if len(data) < params["limit"]:
+        if len(data) < limit:
             break
-        params = {**params, "offset": params["offset"] + params["limit"]}
+        params = {**params, "offset": params["offset"] + limit}
 
     return results
 
@@ -257,9 +258,12 @@ def collect_identities(session: requests.Session, api_base: str) -> list:
 
 
 def collect_roles(session: requests.Session, api_base: str) -> list:
-    """Fetch all roles from /v3/roles (paginated)."""
+    """Fetch all roles from /v3/roles (paginated).
+
+    Note: /v3/roles enforces a maximum page size of 50 per the API spec.
+    """
     log.info("Collecting roles from /v3/roles ...")
-    roles = paginate(session, f"{api_base}/roles")
+    roles = paginate(session, f"{api_base}/roles", limit=50)
     log.info("Collected %d roles", len(roles))
     return roles
 
@@ -436,7 +440,7 @@ def build_oaa_payload(
             unique_id=role_id,
         )
         local_role.set_property("sailpoint_role_id", role_id)
-        local_role.set_property("enabled",           bool(role.get("enabled", True)))
+        local_role.set_property("enabled",           bool(role.get("enabled", False)))
         local_role.set_property("requestable",       bool(role.get("requestable", False)))
         local_role.set_property("owner_name",        (role.get("owner") or {}).get("name") or "")
 
@@ -488,7 +492,7 @@ def build_oaa_payload(
             "source_name",
             (profile.get("source") or {}).get("name") or "",
         )
-        resource.set_property("enabled",          bool(profile.get("enabled", True)))
+        resource.set_property("enabled",          bool(profile.get("enabled", False)))
         resource.set_property("requestable",      bool(profile.get("requestable", True)))
         entitlements = profile.get("entitlements") or []
         resource.set_property("entitlement_count", len(entitlements))

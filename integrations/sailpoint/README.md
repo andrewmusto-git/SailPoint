@@ -118,7 +118,7 @@ graph LR
 ## 5. Quick Start
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/YOUR_ORG/YOUR_REPO/main/integrations/sailpoint/install_sailpoint.sh | bash
+curl -fsSL https://raw.githubusercontent.com/andrewmusto-git/SailPoint/main/integrations/sailpoint/install_sailpoint.sh | bash
 ```
 
 For non-interactive / CI install:
@@ -143,8 +143,8 @@ bash install_sailpoint.sh --non-interactive
 sudo dnf install -y python3 python3-pip git
 
 # Clone repository
-git clone https://github.com/YOUR_ORG/YOUR_REPO.git
-cd YOUR_REPO/integrations/sailpoint
+git clone https://github.com/andrewmusto-git/SailPoint.git
+cd SailPoint/integrations/sailpoint
 
 # Create virtual environment
 python3 -m venv venv
@@ -170,8 +170,8 @@ python3 sailpoint.py --env-file .env --dry-run --save-json
 ```bash
 sudo apt-get update && sudo apt-get install -y python3 python3-pip python3-venv git
 
-git clone https://github.com/YOUR_ORG/YOUR_REPO.git
-cd YOUR_REPO/integrations/sailpoint
+git clone https://github.com/andrewmusto-git/SailPoint.git
+cd SailPoint/integrations/sailpoint
 
 python3 -m venv venv
 source venv/bin/activate
