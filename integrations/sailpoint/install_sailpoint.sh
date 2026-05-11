@@ -123,8 +123,10 @@ else
 fi
 
 # Capture the real installing user so we can restore ownership after sudo ops
-INSTALL_USER="$(id -un)"
-INSTALL_GROUP="$(id -gn)"
+# SUDO_USER is set by sudo when the script is invoked via `sudo bash install.sh`;
+# fall back to id -un when running as a non-root user without sudo.
+INSTALL_USER="${SUDO_USER:-$(id -un)}"
+INSTALL_GROUP="$(id -gn "${INSTALL_USER}" 2>/dev/null || id -gn)"
 
 # ── Create directory layout ───────────────────────────────────────────────────
 info "Creating install directories under ${SERVICE_DIR} ..."
