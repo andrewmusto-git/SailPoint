@@ -257,20 +257,29 @@ def paginate_search(
 ) -> list:
     """
     Collect all results from the SailPoint Search API (POST /v3/search).
-    Uses offset-based pagination with the given limit until an empty page
-    is returned.
+
+    Uses cursor-based pagination via `searchAfter` (sorted by id) to avoid
+    the hard 10,000-row offset cap enforced by the API.  Falls back to a
+    first page via offset=0, then switches to searchAfter for every subsequent
+    page using the `id` of the last item in the previous page.
     """
     results = []
-    offset = 0
+    search_after = None
 
     while True:
         payload = {
             "indices": [index],
             "query": {"query": query},
+            "sort": ["id"],
             "includeNested": True,
         }
-        params = {"limit": limit, "offset": offset}
-        log.debug("POST %s  index=%s  offset=%d", url, index, offset)
+        if search_after is not None:
+            payload["searchAfter"] = [search_after]
+
+        params = {"limit": limit}
+        log.debug(
+            "POST %s  index=%s  searchAfter=%s", url, index, search_after
+        )
         try:
             resp = session.post(url, json=payload, params=params, timeout=60)
             resp.raise_for_status()
@@ -287,7 +296,12 @@ def paginate_search(
 
         if len(data) < limit:
             break
-        offset += limit
+
+        # Advance cursor to the id of the last item in this page
+        search_after = data[-1].get("id")
+        if not search_after:
+            log.warning("Last item in page has no 'id'; cannot advance cursor — stopping early")
+            break
 
     return results
 
