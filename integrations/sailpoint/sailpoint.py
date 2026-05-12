@@ -15,10 +15,12 @@ Entity model:
 """
 
 import argparse
+import gc
 import json
 import logging
 import os
 import sys
+import time
 from datetime import datetime
 from logging.handlers import TimedRotatingFileHandler
 
@@ -324,6 +326,85 @@ def paginate_search(
     return results
 
 
+def paginate_search_pages(
+    session: requests.Session,
+    url: str,
+    index: str,
+    query: str = "*",
+    limit: int = 250,
+    progress_label: str = None,
+    page_delay: float = 0.0,
+):
+    """
+    Generator variant of paginate_search.
+
+    Yields one page (list of records) at a time instead of accumulating all
+    results into a single list.  The caller processes each yielded page and
+    lets it go out of scope, so only ``limit`` raw records are in memory at
+    once regardless of how many records the API contains.
+
+    ``page_delay`` adds an optional sleep (seconds) between pages to reduce
+    sustained CPU / network pressure on constrained hosts.
+    """
+    search_after = None
+    page_num = 0
+
+    while True:
+        payload = {
+            "indices": [index],
+            "query": {"query": query},
+            "sort": ["id"],
+            "includeNested": True,
+        }
+        if search_after is not None:
+            payload["searchAfter"] = [search_after]
+
+        params = {"limit": limit}
+        log.debug(
+            "POST %s  index=%s  searchAfter=%s  (streaming)", url, index, search_after
+        )
+        try:
+            resp = session.post(url, json=payload, params=params, timeout=60)
+            resp.raise_for_status()
+        except requests.exceptions.HTTPError as exc:
+            log.error("HTTP error searching %s (index=%s): %s", url, index, exc)
+            raise
+
+        data = resp.json()
+        if not isinstance(data, list) or not data:
+            break
+
+        page_num += 1
+        log.debug("  → page %d of %d records", page_num, len(data))
+
+        if progress_label:
+            print(
+                f"       {progress_label}: page {page_num} — "
+                f"{len(data):,} records in this page ...",
+                end="\r",
+                flush=True,
+            )
+
+        yield data  # caller processes and discards this page
+
+        last_id = data[-1].get("id") if data else None
+
+        # Release the page from this scope before the next iteration
+        del data
+
+        if not last_id:
+            log.warning("Last item in page has no 'id'; cannot advance cursor — stopping early")
+            break
+
+        search_after = last_id
+
+        if page_delay > 0:
+            time.sleep(page_delay)
+
+    if progress_label and page_num > 0:
+        print()
+
+
 # ─── Data collection ──────────────────────────────────────────────────────────
 def collect_identities(session: requests.Session, api_base: str) -> list:
     """Fetch all identities via POST /v3/search (identities index, paginated).
@@ -405,6 +486,57 @@ def collect_access_profiles(session: requests.Session, api_base: str) -> list:
 
 
 # ─── OAA payload assembly ─────────────────────────────────────────────────────
+def _init_app(config: dict) -> CustomApplication:
+    """
+    Create a CustomApplication and register all custom permissions and property
+    definitions.  Returns an empty app ready to receive users, roles, and
+    resources.  Separated from data loading so the payload can be built
+    incrementally without holding all raw API data in memory at once.
+    """
+    app = CustomApplication(
+        name=config["datasource_name"],
+        application_type=config["provider_name"],
+        description=(
+            "SailPoint Identity Security Cloud — identities, roles, and access profiles "
+            f"for tenant '{config['tenant']}'"
+        ),
+    )
+
+    # ── Custom permissions ──────────────────────────────────────────────────
+    app.add_custom_permission("member", [OAAPermission.DataRead])
+    app.add_custom_permission(
+        "owner",
+        [
+            OAAPermission.DataRead,
+            OAAPermission.DataWrite,
+            OAAPermission.MetadataRead,
+            OAAPermission.MetadataWrite,
+        ],
+    )
+
+    # ── Custom property definitions — Local User ────────────────────────────
+    app.property_definitions.define_local_user_property("sailpoint_id",    "string")
+    app.property_definitions.define_local_user_property("alias",           "string")
+    app.property_definitions.define_local_user_property("manager_name",    "string")
+    app.property_definitions.define_local_user_property("lifecycle_state", "string")
+    app.property_definitions.define_local_user_property("is_manager",      "boolean")
+
+    # ── Custom property definitions — Local Role ────────────────────────────
+    app.property_definitions.define_local_role_property("sailpoint_role_id", "string")
+    app.property_definitions.define_local_role_property("enabled",           "boolean")
+    app.property_definitions.define_local_role_property("requestable",       "boolean")
+    app.property_definitions.define_local_role_property("owner_name",        "string")
+
+    # ── Custom property definitions — Application Resource ──────────────────
+    app.property_definitions.define_resource_property("sailpoint_profile_id", "string")
+    app.property_definitions.define_resource_property("source_name",          "string")
+    app.property_definitions.define_resource_property("enabled",              "boolean")
+    app.property_definitions.define_resource_property("requestable",          "boolean")
+    app.property_definitions.define_resource_property("entitlement_count",    "number")
+
+    return app
+
+
 def build_oaa_payload(
     config: dict,
     identities: list,
@@ -731,6 +863,14 @@ def parse_args() -> argparse.Namespace:
         choices=["DEBUG", "INFO", "WARNING", "ERROR"],
         help="Logging verbosity",
     )
+    rt.add_argument(
+        "--page-delay",
+        type=float,
+        default=0.0,
+        metavar="SECONDS",
+        help="Seconds to sleep between API pages when streaming identities. "
+             "Use 0.5–2.0 on memory-constrained hosts to reduce peak load.",
+    )
 
     return parser.parse_args()
 
@@ -748,6 +888,9 @@ def main() -> None:
     args = parse_args()
     _setup_logging(args.log_level)
     log.info("SailPoint → Veza OAA integration starting")
+
+    if args.page_delay > 0:
+        log.info("Page delay enabled: %.1f seconds between identity pages", args.page_delay)
 
     _TOTAL_STEPS = 8
 
@@ -773,40 +916,174 @@ def main() -> None:
     api_base = f"{config['base_url']}/v3"
     print("       Token obtained successfully")
 
-    _milestone(3, _TOTAL_STEPS, "Collecting identities ...")
-    identities = collect_identities(session, api_base)
-    print(f"       {len(identities):,} identities collected")
+    # ── Collect smaller datasets in full first ────────────────────────────────
+    # Roles, role assignments, and access profiles are far smaller than
+    # identities and are needed as lookup tables during identity streaming.
 
-    _milestone(4, _TOTAL_STEPS, "Collecting roles ...")
+    _milestone(3, _TOTAL_STEPS, "Collecting roles ...")
     roles = collect_roles(session, api_base)
     print(f"       {len(roles):,} roles collected")
 
-    _milestone(5, _TOTAL_STEPS, "Collecting role assignments ...")
+    _milestone(4, _TOTAL_STEPS, "Collecting role assignments ...")
     role_assignments = collect_role_assignments(session, api_base, roles)
     assigned_count = sum(len(v) for v in role_assignments.values())
     print(f"       {assigned_count:,} role-identity assignments collected across {len(role_assignments):,} roles")
 
-    _milestone(6, _TOTAL_STEPS, "Collecting access profiles ...")
+    _milestone(5, _TOTAL_STEPS, "Collecting access profiles ...")
     access_profiles = collect_access_profiles(session, api_base)
     print(f"       {len(access_profiles):,} access profiles collected")
 
-    _milestone(7, _TOTAL_STEPS, "Building OAA payload ...")
-    app = build_oaa_payload(
-        config, identities, roles, role_assignments, access_profiles
-    )
+    # ── Pre-compute lookup tables from roles ──────────────────────────────────
+    # Built once here so they are available during the identity stream without
+    # needing to re-scan the roles list on every page.
+    role_name_map: dict = {
+        r["id"]: r["name"]
+        for r in roles
+        if r.get("id") and r.get("name")
+    }
+    profile_to_roles: dict = {}
+    for role in roles:
+        rname = role_name_map.get(role.get("id", ""), "")
+        if not rname:
+            continue
+        for ap in role.get("accessProfiles") or []:
+            ap_id = ap.get("id", "")
+            if ap_id:
+                profile_to_roles.setdefault(ap_id, []).append(rname)
+
+    # ── Initialise OAA app ────────────────────────────────────────────────────
+    _milestone(6, _TOTAL_STEPS, "Building OAA payload (streaming identities) ...")
+    app = _init_app(config)
+
+    # ── Stream identities page-by-page ────────────────────────────────────────
+    # Only one page of raw identity dicts exists in memory at any time.
+    # Each page is processed into OAA user objects and then released before
+    # the next page is fetched.
+    search_url = f"{api_base}/search"
+    identity_map: dict = {}
+    total_identities = 0
+
+    for page in paginate_search_pages(
+        session,
+        search_url,
+        index="identities",
+        limit=250,
+        progress_label="Identities",
+        page_delay=args.page_delay,
+    ):
+        for identity in page:
+            uid = identity.get("id", "")
+            if not uid:
+                log.debug("Skipping identity with no id: %s", identity.get("name"))
+                continue
+
+            first = identity.get("firstName") or ""
+            last = identity.get("lastName") or ""
+            display_name = (
+                identity.get("name")
+                or f"{first} {last}".strip()
+                or identity.get("alias")
+                or uid
+            )
+            email = identity.get("emailAddress") or ""
+            is_active = identity.get("status", "ACTIVE").upper() == "ACTIVE"
+
+            user = app.add_local_user(
+                name=display_name,
+                unique_id=uid,
+                identities=[email] if email else [],
+            )
+            user.is_active = is_active
+            user.is_admin = False
+
+            user.set_property("sailpoint_id",    uid)
+            user.set_property("alias",           identity.get("alias") or "")
+            user.set_property("manager_name",    (identity.get("manager") or {}).get("name") or "")
+            user.set_property("lifecycle_state", (identity.get("lifecycleState") or {}).get("stateName") or "")
+            user.set_property("is_manager",      bool(identity.get("isManager", False)))
+
+            identity_map[uid] = user
+            total_identities += 1
+        # Raw page released here — only the OAA user objects remain in memory
+
+    log.info("Added %d local users to OAA payload", total_identities)
+    print(f"       {total_identities:,} identities streamed and added to payload")
+    gc.collect()
+
+    # ── Add roles to OAA payload, then free the raw list ─────────────────────
+    for role in roles:
+        role_id = role.get("id", "")
+        role_name = role.get("name", "")
+        if not role_id or not role_name:
+            continue
+        local_role = app.add_local_role(name=role_name, unique_id=role_id)
+        local_role.set_property("sailpoint_role_id", role_id)
+        local_role.set_property("enabled",           bool(role.get("enabled", False)))
+        local_role.set_property("requestable",       bool(role.get("requestable", False)))
+        local_role.set_property("owner_name",        (role.get("owner") or {}).get("name") or "")
+
+    log.info("Added %d local roles to OAA payload", len(role_name_map))
+    del roles
+    gc.collect()
+
+    # ── Identity → Role assignments ───────────────────────────────────────────
+    assignment_count = 0
+    for role_id, identity_ids in role_assignments.items():
+        role_name = role_name_map.get(role_id)
+        if not role_name:
+            continue
+        for identity_id in identity_ids:
+            user = identity_map.get(identity_id)
+            if user:
+                user.add_role(role_name)
+                assignment_count += 1
+
+    log.info("Created %d identity-role assignments", assignment_count)
+    del role_assignments
+    gc.collect()
+
+    # ── Access Profiles as Application Resources, then free the raw list ──────
+    resource_count = 0
+    for profile in access_profiles:
+        profile_id = profile.get("id", "")
+        profile_name = profile.get("name", "")
+        if not profile_id or not profile_name:
+            continue
+
+        resource = app.add_resource(name=profile_name, resource_type="access_profile")
+        resource.set_property("sailpoint_profile_id", profile_id)
+        resource.set_property("source_name",          (profile.get("source") or {}).get("name") or "")
+        resource.set_property("enabled",              bool(profile.get("enabled", False)))
+        resource.set_property("requestable",          bool(profile.get("requestable", True)))
+        entitlements = profile.get("entitlements") or []
+        resource.set_property("entitlement_count",    len(entitlements))
+
+        linked_roles = profile_to_roles.get(profile_id, [])
+        if linked_roles:
+            resource.add_permission("member", local_roles=linked_roles)
+
+        owner_id = (profile.get("owner") or {}).get("id", "")
+        if owner_id and owner_id in identity_map:
+            resource.add_permission("owner", identities=[owner_id])
+
+        resource_count += 1
+
+    log.info("Added %d access-profile resources to OAA payload", resource_count)
+    del access_profiles, profile_to_roles, identity_map
+    gc.collect()
 
     log.info(
-        "Payload summary — identities: %d  roles: %d  access_profiles: %d",
-        len(identities),
-        len(roles),
-        len(access_profiles),
+        "Payload summary — users: %d  roles: %d  access_profiles: %d",
+        total_identities,
+        len(role_name_map),
+        resource_count,
     )
     print(
-        f"       Payload built — {len(identities):,} users  |  "
-        f"{len(roles):,} roles  |  {len(access_profiles):,} access profiles"
+        f"       Payload built — {total_identities:,} users  |  "
+        f"{len(role_name_map):,} roles  |  {resource_count:,} access profiles"
     )
 
-    _milestone(8, _TOTAL_STEPS, "Pushing payload to Veza ..." if not args.dry_run else "Dry-run — skipping Veza push ...")
+    _milestone(7, _TOTAL_STEPS, "Pushing payload to Veza ..." if not args.dry_run else "Dry-run — skipping Veza push ...")
     push_to_veza(config, app, dry_run=args.dry_run, save_json=args.save_json)
     log.info("Integration run complete")
     print("\n  Done.")
@@ -815,3 +1092,4 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
+
