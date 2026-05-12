@@ -528,11 +528,11 @@ def _init_app(config: dict) -> CustomApplication:
     app.property_definitions.define_local_role_property("owner_name",        OAAPropertyType.STRING)
 
     # ── Custom property definitions — Application Resource ──────────────────
-    app.property_definitions.define_resource_property("sailpoint_profile_id", OAAPropertyType.STRING)
-    app.property_definitions.define_resource_property("source_name",          OAAPropertyType.STRING)
-    app.property_definitions.define_resource_property("enabled",              OAAPropertyType.BOOLEAN)
-    app.property_definitions.define_resource_property("requestable",          OAAPropertyType.BOOLEAN)
-    app.property_definitions.define_resource_property("entitlement_count",    OAAPropertyType.NUMBER)
+    app.property_definitions.define_resource_property("access_profile", "sailpoint_profile_id", OAAPropertyType.STRING)
+    app.property_definitions.define_resource_property("access_profile", "source_name",          OAAPropertyType.STRING)
+    app.property_definitions.define_resource_property("access_profile", "enabled",              OAAPropertyType.BOOLEAN)
+    app.property_definitions.define_resource_property("access_profile", "requestable",          OAAPropertyType.BOOLEAN)
+    app.property_definitions.define_resource_property("access_profile", "entitlement_count",    OAAPropertyType.NUMBER)
 
     return app
 
@@ -595,11 +595,11 @@ def build_oaa_payload(
     app.property_definitions.define_local_role_property("owner_name",        OAAPropertyType.STRING)
 
     # ── Custom property definitions — Application Resource ──────────────────
-    app.property_definitions.define_resource_property("sailpoint_profile_id", OAAPropertyType.STRING)
-    app.property_definitions.define_resource_property("source_name",          OAAPropertyType.STRING)
-    app.property_definitions.define_resource_property("enabled",              OAAPropertyType.BOOLEAN)
-    app.property_definitions.define_resource_property("requestable",          OAAPropertyType.BOOLEAN)
-    app.property_definitions.define_resource_property("entitlement_count",    OAAPropertyType.NUMBER)
+    app.property_definitions.define_resource_property("access_profile", "sailpoint_profile_id", OAAPropertyType.STRING)
+    app.property_definitions.define_resource_property("access_profile", "source_name",          OAAPropertyType.STRING)
+    app.property_definitions.define_resource_property("access_profile", "enabled",              OAAPropertyType.BOOLEAN)
+    app.property_definitions.define_resource_property("access_profile", "requestable",          OAAPropertyType.BOOLEAN)
+    app.property_definitions.define_resource_property("access_profile", "entitlement_count",    OAAPropertyType.NUMBER)
 
     # ── Local Users from SailPoint Identities ───────────────────────────────
     identity_map: dict = {}  # sailpoint_id → OAA Local User object
