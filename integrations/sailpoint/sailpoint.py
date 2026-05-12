@@ -10,8 +10,8 @@ Entity model:
   SailPoint Role          → OAA Local Role
   SailPoint Access Profile → OAA Application Resource
   Identity-Role assignment → user.add_role()
-  Role-Access Profile link → resource.add_permission("member", local_roles=[...])
-  Access Profile owner     → resource.add_permission("owner", identities=[...])
+  Role-Access Profile link → app.local_roles[role_name].add_permission("member", resources=[resource])
+  Access Profile owner     → identity_map[uid].add_permission("owner", resources=[resource])
 """
 
 import argparse
@@ -552,8 +552,8 @@ def build_oaa_payload(
       Role            → Local Role     (unique_id = SailPoint role id)
       Identity→Role   → user.add_role(role_name)
       Access Profile  → Resource       (resource_type = "access_profile")
-      Role→Profile    → resource.add_permission("member", local_roles=[...])
-      Profile owner   → resource.add_permission("owner", identities=[...])
+      Role→Profile    → app.local_roles[role_name].add_permission("member", resources=[resource])
+      Profile owner   → identity_map[uid].add_permission("owner", resources=[resource])
     """
     log.info("Building OAA payload ...")
 
@@ -712,13 +712,14 @@ def build_oaa_payload(
 
         # Give 'member' permission to every role that contains this access profile
         linked_roles = profile_to_roles.get(profile_id, [])
-        if linked_roles:
-            resource.add_permission("member", local_roles=linked_roles)
+        for role_name in linked_roles:
+            if role_name in app.local_roles:
+                app.local_roles[role_name].add_permission("member", resources=[resource])
 
         # Give 'owner' permission to the access profile's designated owner identity
         owner_id = (profile.get("owner") or {}).get("id", "")
         if owner_id and owner_id in identity_map:
-            resource.add_permission("owner", identities=[owner_id])
+            identity_map[owner_id].add_permission("owner", resources=[resource])
 
         resource_count += 1
 
@@ -1059,12 +1060,13 @@ def main() -> None:
         resource.set_property("entitlement_count",    len(entitlements))
 
         linked_roles = profile_to_roles.get(profile_id, [])
-        if linked_roles:
-            resource.add_permission("member", local_roles=linked_roles)
+        for role_name in linked_roles:
+            if role_name in app.local_roles:
+                app.local_roles[role_name].add_permission("member", resources=[resource])
 
         owner_id = (profile.get("owner") or {}).get("id", "")
         if owner_id and owner_id in identity_map:
-            resource.add_permission("owner", identities=[owner_id])
+            identity_map[owner_id].add_permission("owner", resources=[resource])
 
         resource_count += 1
 
