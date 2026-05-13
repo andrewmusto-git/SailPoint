@@ -6,12 +6,14 @@ Collects identity, role, and access-profile data from SailPoint ISC (v3 API)
 and pushes it into Veza's Access Graph via the Open Authorization API (OAA).
 
 Entity model:
-  SailPoint Identity      → OAA Local User
-  SailPoint Role          → OAA Local Role
-  SailPoint Access Profile → OAA Application Resource
-  Identity-Role assignment → user.add_role()
-  Role-Access Profile link → app.local_roles[role_name].add_permission("member", resources=[resource])
-  Access Profile owner     → identity_map[uid].add_permission("owner", resources=[resource])
+  SailPoint Identity       → OAA Local User
+  SailPoint Role           → OAA Local Role  (assigned to users with apply_to_application=True)
+  SailPoint Source         → OAA Application Resource        (resource_type="source")
+  SailPoint Access Profile → OAA Sub-resource of Source      (resource_type="access_profile")
+  SailPoint Entitlement    → OAA Sub-resource of Access Profile (resource_type="entitlement")
+  Identity-Role assignment → user.add_role(role_name, apply_to_application=True)
+  User-Access Profile link → user.add_permission("member", resources=[ap_sub_resource])
+  Access Profile owner     → identity_map[uid].add_permission("owner", resources=[ap_sub_resource])
 """
 
 import argparse
@@ -534,6 +536,14 @@ def _init_app(config: dict) -> CustomApplication:
     app.property_definitions.define_resource_property("access_profile", "requestable",          OAAPropertyType.BOOLEAN)
     app.property_definitions.define_resource_property("access_profile", "entitlement_count",    OAAPropertyType.NUMBER)
 
+    # ── Custom property definitions — Source resource ───────────────────────
+    app.property_definitions.define_resource_property("source", "sailpoint_source_id", OAAPropertyType.STRING)
+
+    # ── Custom property definitions — Entitlement sub-resource ─────────────
+    app.property_definitions.define_resource_property("entitlement", "sailpoint_entitlement_id", OAAPropertyType.STRING)
+    app.property_definitions.define_resource_property("entitlement", "attribute",               OAAPropertyType.STRING)
+    app.property_definitions.define_resource_property("entitlement", "value",                   OAAPropertyType.STRING)
+
     return app
 
 
@@ -1017,7 +1027,7 @@ def main() -> None:
         role_name = role.get("name", "")
         if not role_id or not role_name:
             continue
-        local_role = app.add_local_role(name=role_name, unique_id=role_id)
+        local_role = app.add_local_role(name=role_name, unique_id=role_id, permissions=["member"])
         local_role.set_property("sailpoint_role_id", role_id)
         local_role.set_property("enabled",           bool(role.get("enabled", False)))
         local_role.set_property("requestable",       bool(role.get("requestable", False)))
@@ -1036,53 +1046,119 @@ def main() -> None:
         for identity_id in identity_ids:
             user = identity_map.get(identity_id)
             if user:
-                user.add_role(role_name)
+                user.add_role(role_name, apply_to_application=True)
                 assignment_count += 1
 
     log.info("Created %d identity-role assignments", assignment_count)
-    del role_assignments
-    gc.collect()
+    # NOTE: role_assignments is kept alive until after the AP permission-grant loop below
 
-    # ── Access Profiles as Application Resources, then free the raw list ──────
+    # ── Source → Access Profile → Entitlement resource hierarchy ────────────
+    # Source is a top-level resource; Access Profiles are sub-resources of their
+    # Source; Entitlements are sub-resources of their Access Profile.
+    source_resources: dict = {}   # source_id → CustomResource
+    ap_resources:     dict = {}   # profile_id → CustomResource (sub of source)
     resource_count = 0
+
     for profile in access_profiles:
-        profile_id = profile.get("id", "")
+        profile_id   = profile.get("id", "")
         profile_name = profile.get("name", "")
         if not profile_id or not profile_name:
             continue
 
-        resource = app.add_resource(name=profile_name, resource_type="access_profile")
-        resource.set_property("sailpoint_profile_id", profile_id)
-        resource.set_property("source_name",          (profile.get("source") or {}).get("name") or "")
-        resource.set_property("enabled",              bool(profile.get("enabled", False)))
-        resource.set_property("requestable",          bool(profile.get("requestable", True)))
+        # ── Source (create once per unique source) ────────────────────────
+        source_info = profile.get("source") or {}
+        source_id   = source_info.get("id") or "unknown"
+        source_name = source_info.get("name") or "Unknown Source"
+        if source_id not in source_resources:
+            src_resource = app.add_resource(
+                name=source_name,
+                resource_type="source",
+                unique_id=source_id,
+            )
+            src_resource.set_property("sailpoint_source_id", source_id)
+            source_resources[source_id] = src_resource
+        else:
+            src_resource = source_resources[source_id]
+
+        # ── Access Profile as sub-resource of Source ──────────────────────
+        ap_resource = src_resource.add_sub_resource(
+            name=profile_name,
+            resource_type="access_profile",
+            unique_id=profile_id,
+        )
+        ap_resource.set_property("sailpoint_profile_id", profile_id)
+        ap_resource.set_property("source_name",          source_name)
+        ap_resource.set_property("enabled",              bool(profile.get("enabled", False)))
+        ap_resource.set_property("requestable",          bool(profile.get("requestable", True)))
         entitlements = profile.get("entitlements") or []
-        resource.set_property("entitlement_count",    len(entitlements))
+        ap_resource.set_property("entitlement_count",    len(entitlements))
 
-        linked_roles = profile_to_roles.get(profile_id, [])
-        for role_name in linked_roles:
-            if role_name in app.local_roles:
-                app.local_roles[role_name].add_permission("member", resources=[resource])
+        # ── Entitlements as sub-resources of Access Profile ───────────────
+        for ent in entitlements:
+            ent_id   = ent.get("id", "")
+            ent_name = ent.get("name") or ent.get("value") or ent_id
+            if not ent_id or not ent_name:
+                continue
+            ent_resource = ap_resource.add_sub_resource(
+                name=ent_name,
+                resource_type="entitlement",
+                unique_id=ent_id,
+            )
+            ent_resource.set_property("sailpoint_entitlement_id", ent_id)
+            ent_resource.set_property("attribute", ent.get("attribute") or "")
+            ent_resource.set_property("value",     ent.get("value") or "")
 
+        # ── Access Profile owner ──────────────────────────────────────────
         owner_id = (profile.get("owner") or {}).get("id", "")
         if owner_id and owner_id in identity_map:
-            identity_map[owner_id].add_permission("owner", resources=[resource])
+            identity_map[owner_id].add_permission("owner", resources=[ap_resource])
 
+        ap_resources[profile_id] = ap_resource
         resource_count += 1
 
-    log.info("Added %d access-profile resources to OAA payload", resource_count)
-    del access_profiles, profile_to_roles, identity_map
+    log.info(
+        "Built %d source resources and %d access-profile sub-resources",
+        len(source_resources),
+        resource_count,
+    )
+    del access_profiles
+    gc.collect()
+
+    # ── Direct user → Access Profile permission grants ────────────────────────
+    # For each role a user holds, grant "member" on every Access Profile in that
+    # role so the path User > Source > Access Profile > Entitlement is visible.
+    grant_count = 0
+    for role in roles:
+        role_id      = role.get("id", "")
+        identity_ids = role_assignments.get(role_id, [])
+        if not identity_ids:
+            continue
+        for ap_ref in role.get("accessProfiles") or []:
+            ap_id       = ap_ref.get("id", "")
+            ap_resource = ap_resources.get(ap_id)
+            if not ap_resource:
+                continue
+            for identity_id in identity_ids:
+                user = identity_map.get(identity_id)
+                if user:
+                    user.add_permission("member", resources=[ap_resource])
+                    grant_count += 1
+
+    log.info("Granted %d user-to-access-profile permission entries", grant_count)
+    del profile_to_roles, source_resources, ap_resources, role_assignments, identity_map
     gc.collect()
 
     log.info(
-        "Payload summary — users: %d  roles: %d  access_profiles: %d",
+        "Payload summary — users: %d  roles: %d  access_profiles: %d  user-ap grants: %d",
         total_identities,
         len(role_name_map),
         resource_count,
+        grant_count,
     )
     print(
         f"       Payload built — {total_identities:,} users  |  "
-        f"{len(role_name_map):,} roles  |  {resource_count:,} access profiles"
+        f"{len(role_name_map):,} roles  |  {resource_count:,} access profiles  |  "
+        f"{grant_count:,} user-AP grants"
     )
 
     _milestone(7, _TOTAL_STEPS, "Pushing payload to Veza ..." if not args.dry_run else "Dry-run — skipping Veza push ...")
