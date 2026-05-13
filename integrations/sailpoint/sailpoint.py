@@ -1034,7 +1034,6 @@ def main() -> None:
         local_role.set_property("owner_name",        (role.get("owner") or {}).get("name") or "")
 
     log.info("Added %d local roles to OAA payload", len(role_name_map))
-    del roles
     gc.collect()
 
     # ── Identity → Role assignments ───────────────────────────────────────────
@@ -1145,7 +1144,7 @@ def main() -> None:
                     grant_count += 1
 
     log.info("Granted %d user-to-access-profile permission entries", grant_count)
-    del profile_to_roles, source_resources, ap_resources, role_assignments, identity_map
+    del roles, profile_to_roles, source_resources, ap_resources, role_assignments, identity_map
     gc.collect()
 
     log.info(
