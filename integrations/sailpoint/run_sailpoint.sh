@@ -57,7 +57,7 @@ info "Starting SailPoint → Veza OAA integration ..."
 info "Output log → ${NOHUP_LOG}"
 
 # shellcheck disable=SC2086
-nohup "${PYTHON}" "${MAIN}" \
+nohup "${PYTHON}" -u "${MAIN}" \
     --env-file "${ENV_FILE}" \
     "$@" \
     > "${NOHUP_LOG}" 2>&1 &

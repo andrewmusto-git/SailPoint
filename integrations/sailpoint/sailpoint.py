@@ -890,7 +890,7 @@ def parse_args() -> argparse.Namespace:
 def _milestone(step: int, total: int, message: str) -> None:
     """Print a timestamped progress milestone to stdout."""
     ts = datetime.now().strftime("%H:%M:%S")
-    print(f"  [{ts}] [{step}/{total}] {message}")
+    print(f"  [{ts}] [{step}/{total}] {message}", flush=True)
 
 
 # ─── Entry point ──────────────────────────────────────────────────────────────
