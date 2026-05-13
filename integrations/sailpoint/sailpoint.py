@@ -7,11 +7,11 @@ and pushes it into Veza's Access Graph via the Open Authorization API (OAA).
 
 Entity model:
   SailPoint Identity       → OAA Local User
-  SailPoint Role           → OAA Local Role  (assigned to users with apply_to_application=True)
+  SailPoint Role           → OAA Local Role
   SailPoint Source         → OAA Application Resource        (resource_type="source")
   SailPoint Access Profile → OAA Sub-resource of Source      (resource_type="access_profile")
   SailPoint Entitlement    → OAA Sub-resource of Access Profile (resource_type="entitlement")
-  Identity-Role assignment → user.add_role(role_name, apply_to_application=True)
+  Identity-Role assignment → user.add_role(role_name)
   User-Access Profile link → user.add_permission("member", resources=[ap_sub_resource])
   Access Profile owner     → identity_map[uid].add_permission("owner", resources=[ap_sub_resource])
 """
@@ -947,8 +947,9 @@ def main() -> None:
     # ── Pre-compute lookup tables from roles ──────────────────────────────────
     # Built once here so they are available during the identity stream without
     # needing to re-scan the roles list on every page.
+    # Normalize role names at map-build time so all downstream lookups are consistent
     role_name_map: dict = {
-        r["id"]: r["name"]
+        r["id"]: " ".join((r.get("name") or "").split()).strip()
         for r in roles
         if r.get("id") and r.get("name")
     }
@@ -1024,10 +1025,12 @@ def main() -> None:
     # ── Add roles to OAA payload, then free the raw list ─────────────────────
     for role in roles:
         role_id = role.get("id", "")
-        role_name = role.get("name", "")
+        # Normalize role name: collapse all unicode whitespace (e.g. \u202f, \xa0)
+        # to plain spaces and strip leading/trailing whitespace.
+        role_name = " ".join((role.get("name") or "").split()).strip()
         if not role_id or not role_name:
             continue
-        local_role = app.add_local_role(name=role_name, unique_id=role_id, permissions=["member"])
+        local_role = app.add_local_role(name=role_name, unique_id=role_id)
         local_role.set_property("sailpoint_role_id", role_id)
         local_role.set_property("enabled",           bool(role.get("enabled", False)))
         local_role.set_property("requestable",       bool(role.get("requestable", False)))
@@ -1039,13 +1042,15 @@ def main() -> None:
     # ── Identity → Role assignments ───────────────────────────────────────────
     assignment_count = 0
     for role_id, identity_ids in role_assignments.items():
-        role_name = role_name_map.get(role_id)
+        # Use the normalized name that was registered with add_local_role above
+        raw_name = role_name_map.get(role_id, "")
+        role_name = " ".join(raw_name.split()).strip()
         if not role_name:
             continue
         for identity_id in identity_ids:
             user = identity_map.get(identity_id)
             if user:
-                user.add_role(role_name, apply_to_application=True)
+                user.add_role(role_name)
                 assignment_count += 1
 
     log.info("Created %d identity-role assignments", assignment_count)
