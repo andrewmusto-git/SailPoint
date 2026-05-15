@@ -8,9 +8,9 @@ and pushes it into Veza's Access Graph via the Open Authorization API (OAA).
 Entity model:
   SailPoint Identity       → OAA Local User
   SailPoint Role           → OAA Local Role
-  SailPoint Source         → OAA Application Resource        (resource_type="source")
-  SailPoint Access Profile → OAA Sub-resource of Source      (resource_type="access_profile")
-  SailPoint Entitlement    → OAA Sub-resource of Access Profile (resource_type="entitlement")
+  SailPoint Source         → OAA Application Resource           (resource_type="source")
+  SailPoint Entitlement    → OAA Sub-resource of Source         (resource_type="entitlement")
+  SailPoint Access Profile → OAA Sub-resource of Entitlement    (resource_type="access_profile")
   Identity-Role assignment → user.add_role(role_name)
   User-Access Profile link → user.add_permission("member", resources=[ap_sub_resource])
   Access Profile owner     → identity_map[uid].add_permission("owner", resources=[ap_sub_resource])
@@ -1056,11 +1056,12 @@ def main() -> None:
     log.info("Created %d identity-role assignments", assignment_count)
     # NOTE: role_assignments is kept alive until after the AP permission-grant loop below
 
-    # ── Source → Access Profile → Entitlement resource hierarchy ────────────
-    # Source is a top-level resource; Access Profiles are sub-resources of their
-    # Source; Entitlements are sub-resources of their Access Profile.
+    # ── Source → Entitlement → Access Profile resource hierarchy ────────────
+    # Source is a top-level resource; Entitlements are sub-resources of their
+    # Source; Access Profiles are sub-resources of the Entitlements they include.
     source_resources: dict = {}   # source_id → CustomResource
-    ap_resources:     dict = {}   # profile_id → CustomResource (sub of source)
+    ent_resources:    dict = {}   # (source_id, ent_id) → CustomResource
+    ap_sub_resources: dict = {}   # profile_id → list[CustomResource]
     resource_count = 0
 
     for profile in access_profiles:
@@ -1084,45 +1085,69 @@ def main() -> None:
         else:
             src_resource = source_resources[source_id]
 
-        # ── Access Profile as sub-resource of Source ──────────────────────
-        ap_resource = src_resource.add_sub_resource(
-            name=profile_name,
-            resource_type="access_profile",
-            unique_id=profile_id,
-        )
-        ap_resource.set_property("sailpoint_profile_id", profile_id)
-        ap_resource.set_property("source_name",          source_name)
-        ap_resource.set_property("enabled",              bool(profile.get("enabled", False)))
-        ap_resource.set_property("requestable",          bool(profile.get("requestable", True)))
         entitlements = profile.get("entitlements") or []
-        ap_resource.set_property("entitlement_count",    len(entitlements))
 
-        # ── Entitlements as sub-resources of Access Profile ───────────────
+        # ── Entitlements as sub-resources of Source; AP under each ────────
+        ap_instances = []
         for ent in entitlements:
             ent_id   = ent.get("id", "")
             ent_name = ent.get("name") or ent.get("value") or ent_id
             if not ent_id or not ent_name:
                 continue
-            ent_resource = ap_resource.add_sub_resource(
-                name=ent_name,
-                resource_type="entitlement",
-                unique_id=ent_id,
+
+            ent_key = (source_id, ent_id)
+            if ent_key not in ent_resources:
+                ent_resource = src_resource.add_sub_resource(
+                    name=ent_name,
+                    resource_type="entitlement",
+                    unique_id=ent_id,
+                )
+                ent_resource.set_property("sailpoint_entitlement_id", ent_id)
+                ent_resource.set_property("attribute", ent.get("attribute") or "")
+                ent_resource.set_property("value",     ent.get("value") or "")
+                ent_resources[ent_key] = ent_resource
+            else:
+                ent_resource = ent_resources[ent_key]
+
+            # ── Access Profile as sub-resource of this Entitlement ────────
+            ap_resource = ent_resource.add_sub_resource(
+                name=profile_name,
+                resource_type="access_profile",
+                unique_id=f"{profile_id}::{ent_id}",
             )
-            ent_resource.set_property("sailpoint_entitlement_id", ent_id)
-            ent_resource.set_property("attribute", ent.get("attribute") or "")
-            ent_resource.set_property("value",     ent.get("value") or "")
+            ap_resource.set_property("sailpoint_profile_id", profile_id)
+            ap_resource.set_property("source_name",          source_name)
+            ap_resource.set_property("enabled",              bool(profile.get("enabled", False)))
+            ap_resource.set_property("requestable",          bool(profile.get("requestable", True)))
+            ap_resource.set_property("entitlement_count",    len(entitlements))
+            ap_instances.append(ap_resource)
+
+        # ── Access Profiles with no entitlements: attach directly to Source ─
+        if not ap_instances:
+            ap_resource = src_resource.add_sub_resource(
+                name=profile_name,
+                resource_type="access_profile",
+                unique_id=profile_id,
+            )
+            ap_resource.set_property("sailpoint_profile_id", profile_id)
+            ap_resource.set_property("source_name",          source_name)
+            ap_resource.set_property("enabled",              bool(profile.get("enabled", False)))
+            ap_resource.set_property("requestable",          bool(profile.get("requestable", True)))
+            ap_resource.set_property("entitlement_count",    0)
+            ap_instances.append(ap_resource)
 
         # ── Access Profile owner ──────────────────────────────────────────
         owner_id = (profile.get("owner") or {}).get("id", "")
         if owner_id and owner_id in identity_map:
-            identity_map[owner_id].add_permission("owner", resources=[ap_resource])
+            identity_map[owner_id].add_permission("owner", resources=ap_instances)
 
-        ap_resources[profile_id] = ap_resource
+        ap_sub_resources[profile_id] = ap_instances
         resource_count += 1
 
     log.info(
-        "Built %d source resources and %d access-profile sub-resources",
+        "Built %d source resources, %d entitlement sub-resources, and %d access-profile sub-resources",
         len(source_resources),
+        len(ent_resources),
         resource_count,
     )
     del access_profiles
@@ -1130,7 +1155,7 @@ def main() -> None:
 
     # ── Direct user → Access Profile permission grants ────────────────────────
     # For each role a user holds, grant "member" on every Access Profile in that
-    # role so the path User > Source > Access Profile > Entitlement is visible.
+    # role so the path User > Source > Entitlement > Access Profile is visible.
     grant_count = 0
     for role in roles:
         role_id      = role.get("id", "")
@@ -1138,18 +1163,18 @@ def main() -> None:
         if not identity_ids:
             continue
         for ap_ref in role.get("accessProfiles") or []:
-            ap_id       = ap_ref.get("id", "")
-            ap_resource = ap_resources.get(ap_id)
-            if not ap_resource:
+            ap_id        = ap_ref.get("id", "")
+            ap_instances = ap_sub_resources.get(ap_id)
+            if not ap_instances:
                 continue
             for identity_id in identity_ids:
                 user = identity_map.get(identity_id)
                 if user:
-                    user.add_permission("member", resources=[ap_resource])
-                    grant_count += 1
+                    user.add_permission("member", resources=ap_instances)
+                    grant_count += len(ap_instances)
 
     log.info("Granted %d user-to-access-profile permission entries", grant_count)
-    del roles, profile_to_roles, source_resources, ap_resources, role_assignments, identity_map
+    del roles, profile_to_roles, source_resources, ent_resources, ap_sub_resources, role_assignments, identity_map
     gc.collect()
 
     log.info(
